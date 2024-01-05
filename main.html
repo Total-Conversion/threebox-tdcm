@@ -1,0 +1,225 @@
+<!doctype html>
+<head>
+	<title>Drone tracking</title>
+  <!-- ================================== -->
+  <!-- MapBox and ThreeBox script imports -->
+  <!-- ================================== -->
+  <script src="https://cdn.jsdelivr.net/npm/threebox-plugin@2.2.7/dist/threebox.min.js" type="text/javascript"></script>
+  <script src="https://cdn.jsdelivr.net/npm/threebox-plugin@2.2.7/dist/threebox.js" type="text/javascript"></script>
+  <link href="https://cdn.jsdelivr.net/npm/threebox-plugin@2.2.7/dist/threebox.css" rel="stylesheet" />
+  <script src='https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.js'></script>
+  <link href='https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.css' rel='stylesheet' />
+</head>
+<body>
+	<div id='map' class='map'></div>
+	<script type="module">
+    
+    // Set up MapBox public token
+    mapboxgl.accessToken = 'pk.eyJ1IjoidHdpdG9zbGF3IiwiYSI6ImNscXpjdHBoYjA0aTcyaW15aWxjZHRvd2YifQ.-4iTI47s0inIkrJr0Lb9Cg';
+
+    // Define origin point, map and initial state value
+		var origin = [19.438640, 51.797127];
+    var in_move = false;
+		var map = new mapboxgl.Map({
+			container: 'map',
+			style: 'mapbox://styles/mapbox/dark-v9',
+			center: origin,
+			zoom: 16,
+			pitch: 60,
+			antialias: true
+		});
+    map.addControl(new mapboxgl.NavigationControl());
+
+    // Prepare vars for further value assignement
+		var destination, drone, lines, options, relative_path, absolute_path, offset, spiral_height, spiral_degree_counter, distance;
+
+    //==========================================
+    // Self referential animation loop function.
+    //==========================================
+		function animate() {
+			requestAnimationFrame(animate);
+		}
+
+    //==================================================
+    // Auviliary -sinus by degrees calculation function.
+    //==================================================
+    function sinDeg(angleDegrees) {
+      return -Math.sin(angleDegrees*Math.PI/180);
+    };
+
+    //====================================================
+    // Auviliary -cosinus by degrees calculation function.
+    //====================================================
+    function cosDeg(angleDegrees) {
+      return -Math.cos(angleDegrees*Math.PI/180);
+    };
+
+    //================================
+    // Flight path generation function
+    //================================
+    function generatePath(destination) {
+
+      // Assing initial values to distance, offset and relative path coords
+      distance = Math.sqrt((origin[0]-destination[0])**2 + (origin[1]-destination[1])**2);
+      offset = 0;
+      relative_path = [[0.0, 0.0, 0]]
+
+      // Append relative path coords with first part of path (squares)
+      for (let i = 0.0; i <= distance; i=i+0.001) {
+        relative_path.push(
+          [-0.00001, i, 30],
+          [0.0, i, 30],
+          [0.00001, i, 30],
+          //
+          [0.001, i, 10],
+          //
+          [0.00199, i, 30],
+          [0.002, i, 30],
+          [0.00201, i, 30],
+          //
+          [0.002, i+0.000499, 30],
+          [0.002, i+0.0005, 30],
+          [0.002, i+0.000501, 30],
+          //
+          [0.001, i+0.0005, 10],
+          //
+          [-0.00001, i+0.0005, 30],
+          [0.0, i+0.0005, 30],
+          [0.00001, i+0.0005, 30],
+        )
+        offset = i+0.0005;
+      }
+
+      // Append relative path coords with first and second part separator
+      relative_path.push(
+        [-0.001, offset-0.000001, 40],
+        [-0.001, offset, 40],
+        [-0.001, offset+0.000001, 40]
+      )
+
+      // Append relative path coords with second part of path (sinusoid)
+      const way_back_in_pi = offset*1000 * 180 + 90
+      for (let i = offset; i >= 0.0; i = i-0.00005) {
+        relative_path.push([-0.001 + 0.0008*sinDeg(way_back_in_pi*(1+(offset-i/offset))), i, 80 - (40*i/offset)])
+      }
+
+      // Append relative path coords with second and third part separator
+      relative_path.push([-0.001 + 0.0008*sinDeg(way_back_in_pi*(1+offset)), -0.0005, 80])
+
+      // Append relative path coords with third part of path (spiral)
+      spiral_height = 80;
+      spiral_degree_counter = 0;
+      while (spiral_height > 30) {
+        relative_path.push(
+          [-0.001 -0.0005*sinDeg(spiral_degree_counter), -0.001-0.0005*cosDeg(spiral_degree_counter), spiral_height],
+        )
+        spiral_height -= 1;
+        spiral_degree_counter += 15;
+      }
+
+      // Calculate the destination angle and transform relative path to absolute path
+      let angle = (Math.atan2(destination[1] - origin[1], destination[0] - origin[0]) * 180) / Math.PI+90;
+      absolute_path = [[origin[0], origin[1], 0]]
+      relative_path.forEach((point) => {
+        absolute_path.push([
+          origin[0]+(point[0]*cosDeg(angle) - point[1]*sinDeg(angle)),
+          origin[1]+(point[0]*sinDeg(angle) + point[1]*cosDeg(angle)),
+          point[2]
+        ])
+      })
+      absolute_path.push(
+        [origin[0], origin[1], 30],
+        [origin[0], origin[1], 0]
+      )
+    }
+
+    //=================================
+    // Drone flight triggering function
+    //=================================
+		function travelPath(destination) {
+      // Verify if another flight is not taking place
+      if (!in_move) {
+
+        // Mark flight as begun and generate the flight path
+        in_move = true;
+        generatePath(destination);
+
+        // Define path following options and order the drone to begin following
+        options = {
+          path: absolute_path,
+          duration: 7000000*distance,
+          trackHeading: false
+        }
+        drone.followPath(
+          options,
+          function () {
+            lines.forEach((line)=>{ tb.remove(line); })
+            in_move = false;
+          }
+        );
+        
+        // Gather and draw path lines
+        lines = [];
+        let line = tb.line({
+          geometry: options.path,
+          width: 5,
+          color: 'steelblue',
+          opacity: 0.6,
+        })
+        tb.add(line);
+        lines.push(line);
+
+        // Gather and draw altitude lines
+        for (let i = 0; i < options.path.length-1; i++) {
+          let line = tb.line({
+            geometry: [
+              [options.path[i+1][0], options.path[i+1][1], options.path[i+1][2]],
+              [options.path[i+1][0], options.path[i+1][1], 0.0]
+            ],
+            width: 1,
+            color: 'white',
+            opacity: 0.2,
+          })
+          tb.add(line);
+          lines.push(line);
+        }
+      }
+		}
+
+		map.on('style.load', function () {
+      // Launch animation loop once the styles are loaded
+			animate();
+
+      // Add 3D layer to the map
+			map.addLayer({
+        id: 'custom_layer',
+        type: 'custom',
+        renderingMode: '3d',
+        onAdd: function (map, mbxContext) {
+          // Assign ThreeBox instance
+          window.tb = new Threebox(map, mbxContext, { defaultLights: true });
+
+          // Define drone model options and generate the model
+          options = {
+            type: 'mtl',
+            obj: 'Drone/drone.obj',
+            mtl: 'Drone/drone.mtl',
+            scale: 10,
+            units: 'meters',
+            anchor: "auto",
+            rotation: { x: 90, y: 90, z: 0 },
+            adjustment: {x: 0, y: -0.4, z: 0}
+          }
+          tb.loadObj(options, function (model) {
+            drone = model.setCoords(origin);
+            tb.add(drone);
+          })
+        },
+        render: function (gl, matrix) { tb.update(); }
+      });
+		}).on('click', function (e) {
+      // Add flight trigger upon click
+      travelPath([e.lngLat.lng, e.lngLat.lat]);
+    })
+	</script>
+</body>
